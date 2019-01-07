@@ -1,7 +1,8 @@
 /*
   Dokan : user-mode file system library for Windows
 
-  Copyright (C) 2015 - 2017 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2015 - 2019 Adrien J. <liryna.stark@gmail.com> and Maxime C. <maxime@islog.com>
+  Copyright (C) 2017 Google, Inc.
   Copyright (C) 2007 - 2011 Hiroki Asakawa <info@dokan-dev.net>
 
   http://dokan-dev.github.io
@@ -24,6 +25,7 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #ifndef DOKAN_MAJOR_API_VERSION
 #define DOKAN_MAJOR_API_VERSION L"1"
+#include <minwindef.h>
 #endif
 
 #define DOKAN_DRIVER_VERSION 0x0000190
@@ -69,6 +71,11 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 #define IOCTL_MOUNTPOINT_CLEANUP                                            \
   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+// DeviceIoControl code to send to a keepalive handle to activate it (see the
+// documentation for the keepalive flags in the DokanFCB struct).
+#define FSCTL_ACTIVATE_KEEPALIVE                                               \
+  CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 0x80F, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 #define DRIVER_FUNC_INSTALL 0x01
 #define DRIVER_FUNC_REMOVE 0x02
 
@@ -97,6 +104,8 @@ with this program. If not, see <http://www.gnu.org/licenses/>.
 // used in DOKAN_START->DeviceType
 #define DOKAN_DISK_FILE_SYSTEM 0
 #define DOKAN_NETWORK_FILE_SYSTEM 1
+
+#define DOKAN_KEEPALIVE_FILE_NAME L"\\__drive_fs_keepalive"
 
 /*
  * This structure is used for copying UNICODE_STRING from the kernel mode driver
@@ -361,8 +370,10 @@ typedef struct _EVENT_START {
   ULONG IrpTimeout;
 } EVENT_START, *PEVENT_START;
 
+#ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4201)
+#endif
 typedef struct _DOKAN_RENAME_INFORMATION {
 #if (_WIN32_WINNT >= _WIN32_WINNT_WIN10_RS1)
 	union {
@@ -375,12 +386,33 @@ typedef struct _DOKAN_RENAME_INFORMATION {
   ULONG FileNameLength;
   WCHAR FileName[1];
 } DOKAN_RENAME_INFORMATION, *PDOKAN_RENAME_INFORMATION;
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
 typedef struct _DOKAN_LINK_INFORMATION {
   BOOLEAN ReplaceIfExists;
   ULONG FileNameLength;
   WCHAR FileName[1];
 } DOKAN_LINK_INFORMATION, *PDOKAN_LINK_INFORMATION;
+
+/**
+* \struct DOKAN_CONTROL
+* \brief Dokan Control
+*/
+typedef struct _DOKAN_CONTROL {
+  /** File System Type */
+  ULONG Type;
+  /** Mount point. Can be "M:\" (drive letter) or "C:\mount\dokan" (path in NTFS) */
+  WCHAR MountPoint[MAX_PATH];
+  /** UNC name used for network volume */
+  WCHAR UNCName[64];
+  /** Disk Device Name */
+  WCHAR DeviceName[64];
+  /** Volume Device Object */
+  PVOID64 DeviceObject;
+  /** Session ID of calling process */
+  ULONG SessionId;
+} DOKAN_CONTROL, *PDOKAN_CONTROL;
 
 #endif // PUBLIC_H_

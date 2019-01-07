@@ -1,24 +1,27 @@
 -
   environment:
     CoverityProjectToken:
-      secure: 1mtSEr5uFQI5rdwItPXrR1y4fV+SUWt55lUSQB5o3x8=
+      secure: 5SIsLVvmrWC2ojiFFkiVRI2jvXeNeFwuzQgmnw85ag0=
     CoverityNotificationEmail:
       secure: 0SPcT7MZEWl9NsqpKSOoLBCfqx/KVDAte5+xvbRremg=
     AccessTokenDokanDoc:
       secure: 1JpCwgUIFUddCeF/nvSRQxb309YpVnHvN/Sd5DLRQCQPTSv/YZVv7CspelmBGSua
     global:
       DOKAN_CI_CACHE: C:\dokan_ci_cache
+      DOXYGEN_INST_DIR: '%DOKAN_CI_CACHE%\doxygen'
       CYG_CACHE: '%DOKAN_CI_CACHE%\cygwin'
       MSYS2_CACHE: '%DOKAN_CI_CACHE%\msys2'
       CHOCO_CACHE: '%DOKAN_CI_CACHE%\choco'
       WLK_INST_CACHE: '%DOKAN_CI_CACHE%\wlk_inst'
       DOKAN_MAIN_BUILD_JOB_NAME: "Image: Visual Studio 2017; Configuration: All"
 
-  version: 1.1.0-{build}
+  version: 1.2.1-{build}
   configuration:
   - All
   - Coverity
+  - SonarQube
   - FsTest
+  - Documentation
 
   image:
     - Visual Studio 2017
@@ -33,6 +36,10 @@
         image: Visual Studio 2015
       - configuration: Coverity
         image: Visual Studio 2015
+      - configuration: SonarQube
+        image: Visual Studio 2015
+      - configuration: Documentation
+        image: Visual Studio 2015
   max_jobs: 1
   cache:
   - '%DOKAN_CI_CACHE% -> appveyor.yml'
@@ -46,6 +53,8 @@
 #    - ps: $blockRdp = $true; Invoke-Expression (Invoke-WebRequest 'https://raw.githubusercontent.com/appveyor/ci/master/scripts/enable-rdp.ps1')
 
   install:
+    - ps: |
+        New-Item -ItemType Directory -Force -Path ${env:DOKAN_CI_CACHE} | Out-Null
     - ps: |
         if ($env:CONFIGURATION -eq "FsTest" -or $env:CONFIGURATION -eq "All") {
           .\cert\dokan-import.ps1
@@ -83,8 +92,27 @@
           Exec-External {& powershell .\scripts\install_wlk_ifstest.ps1 }
         }
     - ps: |
-        if ($env:CONFIGURATION -eq "All") {
-          Exec-External {& choco install "--cache-location=${env:CHOCO_CACHE}" doxygen.portable}
+        if ($env:CONFIGURATION -eq "Documentation") {
+          # choco doxygen.portable has ftp download issue for now
+          # Exec-External {& choco install "--cache-location=${env:CHOCO_CACHE}" doxygen.portable}
+          $env:PATH = "$env:DOXYGEN_INST_DIR;$env:PATH"
+          if (Test-Path $env:DOXYGEN_INST_DIR) {
+            Write-Host "Doxygen in cache, skipping."
+            return
+          }
+          New-Item -Force -Type Directory $env:DOXYGEN_INST_DIR | Out-Null
+          cd $env:DOXYGEN_INST_DIR
+          $doxygen_zip = "$env:TEMP\doxygen.zip"
+          # Version has to be < 1.8.12 because doxyboot theme is incompatible with later versions
+          # https://github.com/Velron/doxygen-bootstrapped/issues/20
+          # https://github.com/Velron/doxygen-bootstrapped/issues/27
+          Write-Host "Downloading Doxygen..."
+          Invoke-WebRequest https://netcologne.dl.sourceforge.net/project/doxygen/rel-1.8.11/doxygen-1.8.11.windows.x64.bin.zip -OutFile $doxygen_zip
+          if ($(Get-FileHash -Algorithm SHA256 $doxygen_zip).Hash -ne "6CE7C259975FB3DC449313913DE71B89665D15C49CF674DB6952F304BB3DFAAA") {
+            throw "Hash mismatch while downloading Doxygen"
+          }
+          Exec-External {& 7z x -y "$doxygen_zip"}
+          cd $env:APPVEYOR_BUILD_FOLDER
         }
     - ps: |
         if ($env:CONFIGURATION -eq "All") {
@@ -121,8 +149,17 @@
           # TODO: detect if restart is necessary and only run as many times as needed.
           #       Maybe two times is enough in all cases, but better be safe than sorry and run it three times.
           # See https://github.com/msys2/msys2/wiki/MSYS2-installation#iii-updating-packages
+          # For the `--ask 20` option, see
+          # <https://github.com/Alexpux/MSYS2-packages/issues/1141>.
+          #
+          # Otherwise the message
+          #
+          #     :: msys2-runtime and catgets are in conflict. Remove catgets? [y/N]
+          #
+          # is displayed when trying to update followed by an exit rather
+          # than selecting yes.
           for ($i = 0; $i -lt 3; $i++) {
-            bash "pacman -Syuu --noconfirm --cache `"$unix_msys2_cache`""
+            bash "pacman -Syuu --ask 20 --noconfirm --cache `"$unix_msys2_cache`""
           }
           # install MinGW toolchain
           bash "pacman --sync --needed --noconfirm --cache `"$unix_msys2_cache`" mingw-w64-{x86_64,i686}-toolchain mingw-w64-{x86_64,i686}-cmake"
@@ -137,6 +174,26 @@
       Write-Host Start building...
       $buildCmd = $(cmd /c where msbuild)
 
+  - ps: |
+      if ($env:CONFIGURATION -eq "SonarQube") {
+       
+        if ($env:APPVEYOR_PULL_REQUEST_NUMBER) {
+          Add-AppveyorMessage -Message "Not running SonarQube on pull request." -Category Information
+          return;
+        }
+      
+        Add-Type -assembly system.io.compression.filesystem
+        choco install "msbuild-sonarqube-runner" -y
+        
+        SonarScanner.MSBuild.exe begin /k:"dokany" /v:$env:APPVEYOR_BUILD_VERSION /d:sonar.organization="dokan-dev" /d:sonar.cfamily.build-wrapper-output=bw-output /d:sonar.host.url="https://sonarcloud.io" /d:sonar.login="094fffbd08033725384e461957a76f13c7ff5682"
+        
+        Invoke-WebRequest https://sonarcloud.io/static/cpp/build-wrapper-win-x86.zip -OutFile .\build-wrapper-win-x86.zip
+        & 7z e .\build-wrapper-win-x86.zip
+               
+        Invoke-Expression ".\build-wrapper-win-x86-64.exe --out-dir bw-output msbuild dokan.sln /m /p:Configuration='Win10 Debug' /p:Platform=x64"
+        
+        SonarScanner.MSBuild.exe end /d:"sonar.login=094fffbd08033725384e461957a76f13c7ff5682"
+      }
   - ps: |
       if ($env:CONFIGURATION -eq "Coverity") {
 
@@ -163,14 +220,21 @@
         --overwrite}
 
         Write-Host "Uploading Coverity results..."
-        Exec-External {& PublishCoverity\tools\PublishCoverity.exe publish `
-        --nologo `
-        -t "$env:CoverityProjectToken" `
-        -e "$env:CoverityNotificationEmail" `
-        -r "dokan-dev/dokany" `
-        -z "coverity.zip" `
-        -d "Appveyor build." `
-        --codeVersion "$env:APPVEYOR_BUILD_VERSION"}
+        try
+        {
+            Exec-External {& PublishCoverity\tools\PublishCoverity.exe publish `
+            --nologo `
+            -t "$env:CoverityProjectToken" `
+            -e "$env:CoverityNotificationEmail" `
+            -r "dokan-dev/dokany" `
+            -z "coverity.zip" `
+            -d "Appveyor build." `
+            --codeVersion "$env:APPVEYOR_BUILD_VERSION"}
+        }
+        catch
+        {
+          Write-Output "Ignore PublishCoverity error"
+        }
       }
 
   - ps: |
@@ -339,7 +403,7 @@
           }
         }
     - ps: |
-        if ($env:CONFIGURATION -eq "All") {
+        if ($env:CONFIGURATION -eq "Documentation") {
             if (!$env:AccessTokenDokanDoc -or "$env:APPVEYOR_PULL_REQUEST_TITLE" -or "$env:APPVEYOR_REPO_BRANCH" -ne "master") {
               return;
             }
